@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ID Screening MVP</title>
+<style>
+  :root { --bg:#0f1420; --card:#161d2e; --accent:#5b8cff; --pass:#3ddc84; --flag:#ffb020; --reject:#ff5b5b; --text:#e8ecf5; --muted:#8b93a7; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 32px 24px 16px; text-align:center; }
+  header h1 { margin:0 0 6px; font-size: 1.6rem; }
+  header p { margin:0; color: var(--muted); }
+  .container { max-width: 760px; margin: 0 auto; padding: 24px; }
+  .card { background: var(--card); border-radius: 14px; padding: 24px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
+  .upload-row { display:flex; gap:16px; flex-wrap:wrap; }
+  .upload-box { flex:1; min-width: 220px; border: 2px dashed #2b3550; border-radius: 12px; padding: 20px; text-align:center; cursor:pointer; transition: border-color .2s; }
+  .upload-box:hover { border-color: var(--accent); }
+  .upload-box input { display:none; }
+  .upload-box img { max-width:100%; max-height:140px; border-radius:8px; margin-top:10px; }
+  .upload-box .label { color: var(--muted); font-size: 0.9rem; }
+  button#submitBtn { width:100%; margin-top:20px; padding:14px; border:none; border-radius:10px; background: var(--accent); color:white; font-size:1rem; font-weight:600; cursor:pointer; }
+  button#submitBtn:disabled { opacity:0.5; cursor:not-allowed; }
+  .result { display:none; }
+  .verdict-badge { display:inline-block; padding:6px 16px; border-radius:20px; font-weight:700; font-size:0.9rem; }
+  .verdict-PASS { background: rgba(61,220,132,0.15); color: var(--pass); }
+  .verdict-FLAG_FOR_REVIEW { background: rgba(255,176,32,0.15); color: var(--flag); }
+  .verdict-REJECT { background: rgba(255,91,91,0.15); color: var(--reject); }
+  .field-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top:14px; }
+  .field { background:#111826; border-radius:8px; padding:10px 12px; }
+  .field .k { color: var(--muted); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em; }
+  .field .v { font-size:1rem; margin-top:2px; }
+  .reasons { margin-top:14px; padding-left: 18px; color: var(--flag); }
+  .ela-img { max-width:100%; border-radius:10px; margin-top:12px; border:1px solid #2b3550; }
+  .spinner { display:none; text-align:center; padding: 20px; color: var(--muted); }
+  .note { color: var(--muted); font-size: 0.8rem; margin-top: 8px; }
+  .error-banner { display:none; background: rgba(255,91,91,0.12); color: var(--reject); border-radius:10px; padding:12px 16px; margin-bottom:16px; }
+  h3 { margin-top:0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI Identity & Document Screening</h1>
+  <p>Upload an ID document and a live selfie to check authenticity and identity match</p>
+</header>
+
+<div class="container">
+  <div class="error-banner" id="errorBanner"></div>
+
+  <div class="card">
+    <div class="upload-row">
+      <label class="upload-box" id="idBox">
+        <div>ID Document</div>
+        <div class="label">Click to upload passport / license / ID card</div>
+        <input type="file" id="idInput" accept="image/*">
+        <img id="idPreview" style="display:none;">
+      </label>
+      <label class="upload-box" id="selfieBox">
+        <div>Live Selfie</div>
+        <div class="label">Click to upload a clear face photo</div>
+        <input type="file" id="selfieInput" accept="image/*">
+        <img id="selfiePreview" style="display:none;">
+      </label>
+    </div>
+    <button id="submitBtn" disabled>Run Screening</button>
+  </div>
+
+  <div class="spinner" id="spinner">Analyzing document...</div>
+
+  <div class="card result" id="resultCard">
+    <h3>Result</h3>
+    <span class="verdict-badge" id="verdictBadge"></span>
+    <div class="field-grid" id="fieldGrid"></div>
+    <ul class="reasons" id="reasonsList"></ul>
+    <img class="ela-img" id="elaImg" style="display:none;">
+    <div class="note">Face match uses a lightweight approximation for demo purposes — not production-grade biometric matching.</div>
+  </div>
+</div>
+
+<script>
+const idInput = document.getElementById('idInput');
+const selfieInput = document.getElementById('selfieInput');
+const idPreview = document.getElementById('idPreview');
+const selfiePreview = document.getElementById('selfiePreview');
+const submitBtn = document.getElementById('submitBtn');
+const spinner = document.getElementById('spinner');
+const resultCard = document.getElementById('resultCard');
+const errorBanner = document.getElementById('errorBanner');
+
+// Vercel Functions cap total request size at 4.5 MB, and phone photos
+// routinely come in well above that on their own. Resize/recompress
+// on the client before upload so requests reliably fit.
+const MAX_DIMENSION = 1600;
+const JPEG_QUALITY = 0.82;
+
+function resizeImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+        const scale = MAX_DIMENSION / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+
+      canvas.toBlob(
+        (blob) => {
+          URL.revokeObjectURL(objectUrl);
+          if (!blob) { reject(new Error('Image compression failed')); return; }
+          resolve(new File([blob], 'upload.jpg', { type: 'image/jpeg' }));
+        },
+        'image/jpeg',
+        JPEG_QUALITY
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Could not read image file'));
+    };
+    img.src = objectUrl;
+  });
+}
+
+function wirePreview(input, preview) {
+  input.addEventListener('change', () => {
+    if (input.files && input.files[0]) {
+      preview.src = URL.createObjectURL(input.files[0]);
+      preview.style.display = 'block';
+    }
+    checkReady();
+  });
+}
+wirePreview(idInput, idPreview);
+wirePreview(selfieInput, selfiePreview);
+
+function checkReady() {
+  submitBtn.disabled = !(idInput.files.length && selfieInput.files.length);
+}
+
+submitBtn.addEventListener('click', async () => {
+  resultCard.style.display = 'none';
+  errorBanner.style.display = 'none';
+  spinner.style.display = 'block';
+  submitBtn.disabled = true;
+
+  try {
+    const [idResized, selfieResized] = await Promise.all([
+      resizeImageFile(idInput.files[0]),
+      resizeImageFile(selfieInput.files[0]),
+    ]);
+
+    const formData = new FormData();
+    formData.append('id_document', idResized);
+    formData.append('selfie', selfieResized);
+
+    const res = await fetch('/api/screen', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.error) { throw new Error(data.error); }
+    renderResult(data);
+  } catch (err) {
+    errorBanner.textContent = 'Error: ' + err.message;
+    errorBanner.style.display = 'block';
+  } finally {
+    spinner.style.display = 'none';
+    submitBtn.disabled = false;
+  }
+});
+
+function renderResult(data) {
+  const badge = document.getElementById('verdictBadge');
+  badge.textContent = data.verdict.decision + ' (risk: ' + data.verdict.risk_score + ')';
+  badge.className = 'verdict-badge verdict-' + data.verdict.decision;
+
+  const grid = document.getElementById('fieldGrid');
+  grid.innerHTML = '';
+  const rows = [
+    ['Name', data.extracted_fields.name || '—'],
+    ['DOB', data.extracted_fields.dob || '—'],
+    ['ID Number', data.extracted_fields.id_number || '—'],
+    ['Tamper Score', data.tamper_check.tamper_score + ' / 100'],
+    ['Face Similarity', (data.face_match.similarity || 0) + '%'],
+    ['Face Match', data.face_match.match ? 'Yes' : 'No'],
+  ];
+  rows.forEach(([k, v]) => {
+    const div = document.createElement('div');
+    div.className = 'field';
+    div.innerHTML = '<div class="k">' + k + '</div><div class="v">' + v + '</div>';
+    grid.appendChild(div);
+  });
+
+  const reasonsList = document.getElementById('reasonsList');
+  reasonsList.innerHTML = '';
+  data.verdict.reasons.forEach(r => {
+    const li = document.createElement('li');
+    li.textContent = r;
+    reasonsList.appendChild(li);
+  });
+
+  const elaImg = document.getElementById('elaImg');
+  if (data.tamper_check.ela_image_data_uri) {
+    elaImg.src = data.tamper_check.ela_image_data_uri;
+    elaImg.style.display = 'block';
+  } else {
+    elaImg.style.display = 'none';
+  }
+
+  resultCard.style.display = 'block';
+}
+</script>
+</body>
+</html>
