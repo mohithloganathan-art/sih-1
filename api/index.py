@@ -55,6 +55,8 @@ from lib.ocr import extract_text_via_ocr_api, parse_fields
 from lib.tamper import tamper_score
 from lib.verdict import overall_verdict
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 app = Flask(__name__, template_folder="templates")
 
 # Backstop against oversized uploads. The frontend already resizes
